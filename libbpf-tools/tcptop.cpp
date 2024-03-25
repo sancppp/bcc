@@ -1,12 +1,3 @@
-/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
-
-/*
- * tcptop Trace sending and received operation over IP.
- * Copyright (c) 2022 Francis Laniel <flaniel@linux.microsoft.com>
- *
- * Based on tcptop(8) from BCC by Brendan Gregg.
- * 03-Mar-2022   Francis Laniel   Created this.
- */
 #include <argp.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -26,6 +17,10 @@
 #include "tcptop.skel.h"
 #include "trace_helpers.h"
 
+#include <prometheus/counter.h>
+#include <prometheus/exposer.h>
+#include <prometheus/registry.h>
+#include <vector>
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 #define OUTPUT_ROWS_LIMIT 10240
 
@@ -209,32 +204,20 @@ static int sort_column(const void *obj1, const void *obj2) {
            (i1->value.sent + i1->value.received);
 }
 
-static int print_stat(struct tcptop_bpf *obj) {
-  FILE *f;
-  time_t t;
-  struct tm *tm;
-  char ts[16], buf[256];
+static int print_stat(struct tcptop_bpf *obj,
+                      prometheus::Family<prometheus::Gauge> &packet_gauge) {
   struct ip_key_t key, *prev_key = NULL;
   static struct info_t infos[OUTPUT_ROWS_LIMIT];
-  int n, i, err = 0;
+  int i, err = 0;
   int fd = bpf_map__fd(obj->maps.ip_map);
   int rows = 0;
   bool ipv6_header_printed = false;
+  static std::vector<std::reference_wrapper<prometheus::Gauge>> gauges;
 
-  // if (!no_summary) {
-  //   f = fopen("/proc/loadavg", "r");
-  //   if (f) {
-  //     time(&t);
-  //     tm = localtime(&t);
-  //     strftime(ts, sizeof(ts), "%H:%M:%S", tm);
-  //     memset(buf, 0, sizeof(buf));
-  //     n = fread(buf, 1, sizeof(buf), f);
-  //     if (n)
-  //       printf("%8s loadavg: %s\n", ts, buf);
-  //     fclose(f);
-  //   }
-  // }
-
+  for (auto &item : gauges) {
+    packet_gauge.Remove(&item.get());
+  }
+  gauges.clear();
   while (1) {
     err = bpf_map_get_next_key(fd, prev_key, &infos[rows].key);
     if (err) {
@@ -295,9 +278,23 @@ static int print_stat(struct tcptop_bpf *obj) {
     snprintf(saddr_port, size, "%s:%d", saddr, key->lport);
     snprintf(daddr_port, size, "%s:%d", daddr, key->dport);
 
-    printf("%-6d %-12.12s %-*s %-*s %6ld %6ld\n", key->pid, key->name,
-           column_width, saddr_port, column_width, daddr_port,
-           value->received / 1024, value->sent / 1024);
+    // printf("%-6d %-12.12s %-*s %-*s %6ld %6ld\n", key->pid, key->name,
+    //        column_width, saddr_port, column_width, daddr_port,
+    //        value->received / 1024, value->sent / 1024);
+    auto &rx = packet_gauge.Add({{"PID", std::to_string(key->pid)},
+                                 {"NAME", key->name},
+                                 {"SADDR", saddr_port},
+                                 {"DADDR", daddr_port},
+                                 {"FX", "RX_KB"}});
+    rx.Set(value->received / 1024);
+    auto &tx = packet_gauge.Add({{"PID", std::to_string(key->pid)},
+                                 {"NAME", key->name},
+                                 {"SADDR", saddr},
+                                 {"DADDR", daddr},
+                                 {"FX", "TX_KB"}});
+    tx.Set(value->sent / 1024);
+    gauges.push_back(rx);
+    gauges.push_back(tx);
   }
 
   // printf("\n");
@@ -325,6 +322,19 @@ static int print_stat(struct tcptop_bpf *obj) {
 }
 
 int main(int argc, char **argv) {
+  // init prometheus
+  prometheus::Exposer exposer{"10.101.164.42:8081"};
+  auto registry = std::make_shared<prometheus::Registry>();
+  auto &packet_gauge =
+      prometheus::BuildGauge().Name("tcpinfo").Help("tcpinfo").Register(
+          *registry);
+  exposer.RegisterCollectable(registry);
+
+  // auto &tcp_rx_g = packet_gauge.Add({{"protocol", "tcp"}, {"direction",
+  // "rx"}}); auto &test = packet_gauge.Add({{"protocol", "test"}, {"direction",
+  // "tx"}}); packet_gauge.Remove(&test); auto &tcp_tx_g =
+  // packet_gauge.Add({{"protocol", "tcp"}, {"direction", "tx"}});
+
   static const struct argp argp = {
       .options = opts,
       .parser = parse_arg,
@@ -392,24 +402,16 @@ int main(int argc, char **argv) {
     err = 1;
     goto cleanup;
   }
-  printf("%-6s %-12s %-21s %-21s %6s %6s", "PID", "COMM", "LADDR", "RADDR",
-         "RX_KB", "TX_KB\n");
+
+  // printf("%-6s %-12s %-21s %-21s %6s %6s", "PID", "COMM", "LADDR", "RADDR",
+  //        "RX_KB", "TX_KB\n");
   while (1) {
     sleep(interval);
 
-    // if (clear_screen) {
-    // 	err = system("clear");
-    // 	if (err)
-    // 		goto cleanup;
-    // }
-
-    err = print_stat(obj);
+    err = print_stat(obj, packet_gauge);
     if (err)
       goto cleanup;
 
-    // count--;
-    // if (exiting || !count)
-    // 	goto cleanup;
     if (exiting) {
       goto cleanup;
     }

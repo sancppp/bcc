@@ -8,8 +8,9 @@ BPFTOOL ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
 LIBBPF_SRC := $(abspath ../src/cc/libbpf/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
 LIBBLAZESYM_SRC := $(abspath blazesym/target/release/libblazesym.a)
-INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi
+INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi -I/usr/local/include/
 CFLAGS := -g -O2 -Wall
+CXXFLAGS := -g -O2 -Wall
 BPFCFLAGS := -g -O2 -Wall
 INSTALL ?= install
 prefix ?= /usr/local
@@ -38,62 +39,7 @@ BZ_APPS = \
 	opensnoop \
 	#
 
-APPS = \
-	bashreadline \
-	bindsnoop \
-	biolatency \
-	biopattern \
-	biosnoop \
-	biostacks \
-	biotop \
-	bitesize \
-	cachestat \
-	capable \
-	cpudist \
-	cpufreq \
-	drsnoop \
-	execsnoop \
-	exitsnoop \
-	filelife \
-	filetop \
-	fsdist \
-	fsslower \
-	funclatency \
-	gethostlatency \
-	hardirqs \
-	javagc \
-	klockstat \
-	ksnoop \
-	llcstat \
-	mdflush \
-	mountsnoop \
-	numamove \
-	offcputime \
-	oomkill \
-	profile \
-	readahead \
-	runqlat \
-	runqlen \
-	runqslower \
-	sigsnoop \
-	slabratetop \
-	softirqs \
-	solisten \
-	statsnoop \
-	syscount \
-	tcptracer \
-	tcpconnect \
-	tcpconnlat \
-	tcplife \
-	tcppktlat \
-	tcprtt \
-	tcpstates \
-	tcpsynbl \
-	tcptop \
-	vfsstat \
-	wakeuptime \
-	$(BZ_APPS) \
-	#
+APPS = tcptop 
 
 # export variables that are used in Makefile.btfgen as well.
 export OUTPUT BPFTOOL ARCH BTFHUB_ARCHIVE APPS
@@ -182,7 +128,8 @@ $(BPFTOOL): | $(BPFTOOL_OUTPUT)
 
 $(APPS): %: $(OUTPUT)/%.o $(COMMON_OBJ) $(LIBBPF_OBJ) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz -o $@
+	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz -o $@ -lstdc++ -lprometheus-cpp-pull -lprometheus-cpp-core -lz
+
 
 ifeq ($(USE_BLAZESYM),1)
 $(patsubst %,$(OUTPUT)/%.o,$(BZ_APPS)): $(OUTPUT)/blazesym.h
@@ -190,9 +137,15 @@ endif
 
 $(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
 
+
 $(OUTPUT)/%.o: %.c $(wildcard %.h) $(LIBBPF_OBJ) | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
+
+$(OUTPUT)/%.o: %.cpp $(wildcard %.h) $(LIBBPF_OBJ) | $(OUTPUT)
+	$(call msg,CXX,$@)
+	$(Q)$(CC) $(CXXFLAGS) $(INCLUDES) -c $(filter %.cpp,$^) -o $@ -lstdc++ -lprometheus-cpp-pull -lprometheus-cpp-core -lz
+
 
 $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT) $(BPFTOOL)
 	$(call msg,GEN-SKEL,$@)
